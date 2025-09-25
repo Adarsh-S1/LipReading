@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration ---
-OUTPUT_CLIPS_DIR = "D:/ADARSH/processed_clips"
+OUTPUT_CLIPS_DIR = "D:/ADARSH/New folder (2)/clips"
 TEMP_AUDIO_DIR = "temp_audio/"
-video_directory = "D:/ADARSH/downloads"
+video_directory = "D:/ADARSH/New folder (2)/video"
 
 # Load environment variables (recommended for secrets)
 HUGGING_FACE_TOKEN = os.getenv("HUGGING_FACE_TOKEN")
