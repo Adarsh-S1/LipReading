@@ -1,0 +1,26 @@
+# Requirements for Landmark Extraction and Lipreading Training
+# ===========================================================
+
+# Core dependencies
+numpy>=1.21.0
+opencv-python>=4.5.0
+mediapipe>=0.8.0
+torch>=1.9.0
+torchvision>=0.10.0
+
+# Data processing
+pandas>=1.3.0
+scikit-learn>=1.0.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Utilities
+tqdm>=4.62.0
+pathlib2>=2.3.0
+argparse
+
+# Optional for advanced features
+# dlib>=19.22.0  # Alternative landmark detection
+# face-alignment>=1.3.0  # Alternative landmark detection
+# tensorflow>=2.6.0  # For TensorFlow-based models
+# transformers>=4.12.0  # For advanced transformer models

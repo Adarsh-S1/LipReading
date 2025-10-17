@@ -2,3 +2,13 @@
 config.js
 secrets.py
 .env
+
+
+Extraction_Code/__pycache__/
+
+#folders to ignore
+Extraction_Code/__pycache__/
+Extraction_Code/extracted_landmarks/
+Extraction_Code/extracted_lip_crosssection/
+Extraction_Code/extracted_landmarks_model_ready/
+
