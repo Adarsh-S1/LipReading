@@ -6,10 +6,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
-from ml2en import transliterate # NEW: Import the Malayalam to Manglish library
+from ml2en import ml2en # Import the Malayalam to Manglish library
 
 # Import the LipFormer model from your script
 from my_model import LipFormer
@@ -17,27 +17,28 @@ from my_model import LipFormer
 # --- 1. Configuration ---
 CONFIG = {
     "data": {
-        "landmarks": "extracted_landmarks_model_ready",
-        "lip_rois": "extracted_lip_crosssection",
+        "landmarks": "D:/ADARSH/extracted_landmarks_model_ready",
+        "lip_rois": "D:/ADARSH/extracted_lip_crosssection",
         "transcripts": "D:/ADARSH/transcripts",
     },
     "checkpoint_dir": "checkpoints",
-    "epochs": 50,
-    "batch_size": 2, # Smaller batch size might be needed due to model complexity
+    "epochs": 1, # Increased epochs for meaningful training
+    "batch_size": 1, # You can try 1 if memory issues persist
     "learning_rate": 1e-4,
     "teacher_forcing_ratio": 0.5,
     "lambda_val": 0.7,
     "image_size": (80, 160),
+    "validation_split": 0.1, # 10% of data for validation
 }
 
 # --- 2. Vocabulary Definitions ---
 
-# --- Vocabulary for Manglish (the intermediate "Pinyin" representation) ---
+# --- Vocabulary for Manglish ---
 MANGLISH_PAD_TOKEN = 0
 MANGLISH_SOS_TOKEN = 1
 MANGLISH_EOS_TOKEN = 2
 MANGLISH_UNK_TOKEN = 3
-MANGLISH_CHARS = string.ascii_lowercase + string.digits + " .'-" # Characters common in Manglish
+MANGLISH_CHARS = string.ascii_lowercase + string.digits + " .'-"
 manglish_to_int = {char: i + 4 for i, char in enumerate(MANGLISH_CHARS)}
 manglish_to_int["<pad>"] = MANGLISH_PAD_TOKEN
 manglish_to_int["<sos>"] = MANGLISH_SOS_TOKEN
@@ -46,8 +47,7 @@ manglish_to_int["<unk>"] = MANGLISH_UNK_TOKEN
 int_to_manglish = {i: char for char, i in manglish_to_int.items()}
 MANGLISH_VOCAB_SIZE = len(manglish_to_int)
 
-# --- Vocabulary for Malayalam (the final "Character" representation) ---
-# This will be built dynamically from the training data
+# --- Vocabulary for Malayalam ---
 MALAYALAM_PAD_TOKEN = 0
 MALAYALAM_SOS_TOKEN = 1
 MALAYALAM_EOS_TOKEN = 2
@@ -58,7 +58,7 @@ malayalam_to_int = {
     "<eos>": MALAYALAM_EOS_TOKEN,
     "<unk>": MALAYALAM_UNK_TOKEN,
 }
-int_to_malayalam = {} # Will be populated after building vocab
+int_to_malayalam = {}
 
 def build_malayalam_vocab(transcript_dir):
     """Scans all transcript files to build the Malayalam character vocabulary."""
@@ -70,17 +70,15 @@ def build_malayalam_vocab(transcript_dir):
         full_text = " ".join([parts[-1] for parts in lines if len(parts) > 2])
         vocab.update(list(full_text))
     
-    # Add unique characters to the mapping
     for i, char in enumerate(sorted(list(vocab))):
-        malayalam_to_int[char] = i + 4 # Start after special tokens
+        malayalam_to_int[char] = i + 4
         
-    # Create the reverse mapping
     global int_to_malayalam
     int_to_malayalam = {i: char for char, i in malayalam_to_int.items()}
     
     return len(malayalam_to_int)
 
-# --- 3. Custom PyTorch Dataset ---
+# --- 3. Custom PyTorch Dataset with Robust Checks ---
 class LipReadingDataset(Dataset):
     def __init__(self, landmark_dir, lip_roi_dir, transcript_dir, img_size):
         self.img_size = img_size
@@ -109,9 +107,27 @@ class LipReadingDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        landmarks = torch.from_numpy(np.load(sample["landmarks"])).float()
+        # MODIFIED: Load landmarks with error handling
+        try:
+            landmarks_np = np.load(sample["landmarks"])
+            if landmarks_np.shape[0] == 0:
+                # print(f"\n[WARNING] Skipping empty landmark file: {sample['landmarks']}")
+                return None
+            landmarks = torch.from_numpy(landmarks_np).float()
+        except Exception as e:
+            # print(f"\n[WARNING] Skipping corrupted landmark file: {sample['landmarks']}. Error: {e}")
+            return None
 
         roi_paths = sorted(glob.glob(os.path.join(sample["rois"], "*.png")))
+        
+        # MODIFIED: Check for empty ROI directory or length mismatch
+        if not roi_paths:
+            # print(f"\n[WARNING] Skipping sample with no ROI frames: {sample['rois']}")
+            return None
+        if len(roi_paths) != landmarks.shape[0]:
+            # print(f"\n[WARNING] Mismatch: Frames({len(roi_paths)}) vs Landmarks({landmarks.shape[0]}) for {os.path.basename(sample['landmarks'])}. Skipping.")
+            return None
+
         frames = []
         for frame_path in roi_paths:
             frame = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
@@ -124,25 +140,23 @@ class LipReadingDataset(Dataset):
             lines = [line.strip().split() for line in f.readlines()]
         malayalam_text = " ".join([parts[-1] for parts in lines if len(parts) > 2])
         
-        # NEW: Transliterate Malayalam to Manglish
-        manglish_text = transliterate(malayalam_text).lower()
+        manglish_text = ml2en.transliterate(malayalam_text).lower()
 
-        # Tokenize Malayalam
-        mal_tokens = [MALAYALAM_SOS_TOKEN]
-        mal_tokens.extend([malayalam_to_int.get(c, MALAYALAM_UNK_TOKEN) for c in malayalam_text])
-        mal_tokens.append(MALAYALAM_EOS_TOKEN)
+        mal_tokens = [MALAYALAM_SOS_TOKEN] + [malayalam_to_int.get(c, MALAYALAM_UNK_TOKEN) for c in malayalam_text] + [MALAYALAM_EOS_TOKEN]
         mal_label = torch.tensor(mal_tokens, dtype=torch.long)
 
-        # Tokenize Manglish
-        man_tokens = [MANGLISH_SOS_TOKEN]
-        man_tokens.extend([manglish_to_int.get(c, MANGLISH_UNK_TOKEN) for c in manglish_text])
-        man_tokens.append(MANGLISH_EOS_TOKEN)
+        man_tokens = [MANGLISH_SOS_TOKEN] + [manglish_to_int.get(c, MANGLISH_UNK_TOKEN) for c in manglish_text] + [MANGLISH_EOS_TOKEN]
         man_label = torch.tensor(man_tokens, dtype=torch.long)
 
         return {"video": video_tensor, "landmarks": landmarks, "malayalam_label": mal_label, "manglish_label": man_label}
 
-# --- 4. Collate Function for Padding ---
+# --- 4. Collate Function to Handle 'None' Samples ---
 def collate_fn(batch):
+    # MODIFIED: Filter out None values from failed loads in __getitem__
+    batch = [item for item in batch if item is not None]
+    if not batch:
+        return None
+
     videos = [item['video'] for item in batch]
     landmarks = [item['landmarks'] for item in batch]
     mal_labels = [item['malayalam_label'] for item in batch]
@@ -155,13 +169,12 @@ def collate_fn(batch):
     
     return {"video": padded_videos, "landmarks": padded_landmarks, "malayalam_label": padded_mal_labels, "manglish_label": padded_man_labels}
 
-# --- 5. Main Training Loop ---
+# --- 5. Main Training & Validation Loop ---
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     os.makedirs(CONFIG["checkpoint_dir"], exist_ok=True)
 
-    # Build the Malayalam vocabulary from the dataset
     MALAYALAM_VOCAB_SIZE = build_malayalam_vocab(CONFIG["data"]["transcripts"])
     print(f"Built Malayalam vocabulary with {MALAYALAM_VOCAB_SIZE} unique characters.")
     print(f"Manglish vocabulary size: {MANGLISH_VOCAB_SIZE}")
@@ -173,11 +186,18 @@ def main():
         print("No data found. Please check configuration paths.")
         return
 
-    data_loader = DataLoader(dataset, batch_size=CONFIG["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=2)
+    # MODIFIED: Split dataset into training and validation sets
+    val_size = int(CONFIG["validation_split"] * len(dataset))
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    print(f"Data split into {len(train_dataset)} training and {len(val_dataset)} validation samples.")
+
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=CONFIG["batch_size"], shuffle=False, collate_fn=collate_fn, num_workers=4)
 
     model = LipFormer(
-        num_pinyins=MANGLISH_VOCAB_SIZE, # Pinyin decoder learns Manglish
-        num_chars=MALAYALAM_VOCAB_SIZE,  # Character decoder learns Malayalam
+        num_pinyins=MANGLISH_VOCAB_SIZE,
+        num_chars=MALAYALAM_VOCAB_SIZE,
         device=device
     ).to(device)
     print(f"Model created with {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M parameters.")
@@ -185,32 +205,68 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
     pinyin_loss_fn = nn.CrossEntropyLoss(ignore_index=MANGLISH_PAD_TOKEN)
     char_loss_fn = nn.CrossEntropyLoss(ignore_index=MALAYALAM_PAD_TOKEN)
+    scaler = torch.cuda.amp.GradScaler() # For mixed precision
+
+    best_val_loss = float('inf')
 
     for epoch in range(CONFIG["epochs"]):
+        # --- Training Phase ---
         model.train()
-        progress_bar = tqdm(data_loader, desc=f"Epoch {epoch+1}/{CONFIG['epochs']}")
-        for batch in progress_bar:
+        train_loss = 0.0
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{CONFIG['epochs']} [Train]")
+        for batch in train_bar:
+            if batch is None: continue # Skip empty batches from collate_fn
+            
             videos, landmarks, mal_targets, man_targets = [d.to(device) for d in batch.values()]
             
             optimizer.zero_grad()
-            pinyin_preds, char_preds = model(videos, landmarks, pinyin_targets=man_targets, char_targets=mal_targets, teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"])
             
-            loss_pinyin = pinyin_loss_fn(pinyin_preds.view(-1, MANGLISH_VOCAB_SIZE), man_targets.view(-1))
-            loss_char = char_loss_fn(char_preds.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets.view(-1))
-            total_loss = CONFIG["lambda_val"] * loss_pinyin + (1 - CONFIG["lambda_val"]) * loss_char
+            with torch.cuda.amp.autocast():
+                pinyin_preds, char_preds = model(videos, landmarks, pinyin_targets=man_targets, char_targets=mal_targets, teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"])
+                loss_pinyin = pinyin_loss_fn(pinyin_preds.view(-1, MANGLISH_VOCAB_SIZE), man_targets.view(-1))
+                loss_char = char_loss_fn(char_preds.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets.view(-1))
+                total_loss = CONFIG["lambda_val"] * loss_pinyin + (1 - CONFIG["lambda_val"]) * loss_char
             
-            total_loss.backward()
-            optimizer.step()
-            progress_bar.set_postfix(loss=f"{total_loss.item():.4f}")
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            train_loss += total_loss.item()
+            train_bar.set_postfix(loss=f"{total_loss.item():.4f}")
 
-        epoch_loss = total_loss.item()
-        print(f"Epoch {epoch+1} finished. Final Batch Loss: {epoch_loss:.4f}")
-        checkpoint_path = os.path.join(CONFIG["checkpoint_dir"], f"lipformer_malayalam_epoch_{epoch+1}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
-        print(f"Model checkpoint saved to {checkpoint_path}")
+        avg_train_loss = train_loss / len(train_loader)
+
+        # --- Validation Phase ---
+        model.eval()
+        val_loss = 0.0
+        val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{CONFIG['epochs']} [Val]")
+        with torch.no_grad():
+            for batch in val_bar:
+                if batch is None: continue
+
+                videos, landmarks, mal_targets, man_targets = [d.to(device) for d in batch.values()]
+                
+                # No teacher forcing during validation
+                pinyin_preds, char_preds = model(videos, landmarks, pinyin_targets=None, char_targets=None, teacher_forcing_ratio=0.0)
+                
+                loss_pinyin = pinyin_loss_fn(pinyin_preds.view(-1, MANGLISH_VOCAB_SIZE), man_targets.view(-1))
+                loss_char = char_loss_fn(char_preds.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets.view(-1))
+                total_loss = CONFIG["lambda_val"] * loss_pinyin + (1 - CONFIG["lambda_val"]) * loss_char
+
+                val_loss += total_loss.item()
+                val_bar.set_postfix(loss=f"{total_loss.item():.4f}")
+
+        avg_val_loss = val_loss / len(val_loader)
+        print(f"Epoch {epoch+1} Summary | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+
+        # MODIFIED: Save only the best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            checkpoint_path = os.path.join(CONFIG["checkpoint_dir"], "lipformer_malayalam_best.pth")
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"🎉 New best model saved to {checkpoint_path} with Val Loss: {best_val_loss:.4f}")
 
     print("Training finished.")
 
 if __name__ == "__main__":
     main()
-
