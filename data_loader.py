@@ -111,21 +111,21 @@ class LipReadingDataset(Dataset):
         try:
             landmarks_np = np.load(sample["landmarks"])
             if landmarks_np.shape[0] == 0:
-                # print(f"\n[WARNING] Skipping empty landmark file: {sample['landmarks']}")
+                print(f"\n[WARNING] Skipping empty landmark file: {sample['landmarks']}")
                 return None
             landmarks = torch.from_numpy(landmarks_np).float()
         except Exception as e:
-            # print(f"\n[WARNING] Skipping corrupted landmark file: {sample['landmarks']}. Error: {e}")
+            print(f"\n[WARNING] Skipping corrupted landmark file: {sample['landmarks']}. Error: {e}")
             return None
 
         roi_paths = sorted(glob.glob(os.path.join(sample["rois"], "*.png")))
         
         # MODIFIED: Check for empty ROI directory or length mismatch
         if not roi_paths:
-            # print(f"\n[WARNING] Skipping sample with no ROI frames: {sample['rois']}")
+            print(f"\n[WARNING] Skipping sample with no ROI frames: {sample['rois']}")
             return None
         if len(roi_paths) != landmarks.shape[0]:
-            # print(f"\n[WARNING] Mismatch: Frames({len(roi_paths)}) vs Landmarks({landmarks.shape[0]}) for {os.path.basename(sample['landmarks'])}. Skipping.")
+            print(f"\n[WARNING] Mismatch: Frames({len(roi_paths)}) vs Landmarks({landmarks.shape[0]}) for {os.path.basename(sample['landmarks'])}. Skipping.")
             return None
 
         frames = []
@@ -169,6 +169,27 @@ def collate_fn(batch):
     
     return {"video": padded_videos, "landmarks": padded_landmarks, "malayalam_label": padded_mal_labels, "manglish_label": padded_man_labels}
 
+
+# --- NEW HELPER FUNCTION ---
+def tokens_to_text(token_indices, int_to_vocab_map):
+    """Converts a tensor of token indices into a human-readable string."""
+    text = ""
+    for token_idx in token_indices:
+        idx = token_idx.item()
+        char = int_to_vocab_map.get(idx)
+        
+        # Stop at the first EOS or PAD token
+        if char == "<eos>" or char == "<pad>":
+            break
+        # Skip the SOS token
+        if char == "<sos>":
+            continue
+            
+        if char is not None:
+            text += char
+    return text
+# --- END NEW HELPER FUNCTION ---
+
 # --- 5. Main Training & Validation Loop ---
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -205,7 +226,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
     pinyin_loss_fn = nn.CrossEntropyLoss(ignore_index=MANGLISH_PAD_TOKEN)
     char_loss_fn = nn.CrossEntropyLoss(ignore_index=MALAYALAM_PAD_TOKEN)
-    scaler = torch.cuda.amp.GradScaler() # For mixed precision
+    scaler = torch.amp.GradScaler('cuda') # For mixed precision
 
     best_val_loss = float('inf')
 
@@ -221,7 +242,7 @@ def main():
             
             optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pinyin_preds, char_preds = model(videos, landmarks, pinyin_targets=man_targets, char_targets=mal_targets, teacher_forcing_ratio=CONFIG["teacher_forcing_ratio"])
                 loss_pinyin = pinyin_loss_fn(pinyin_preds.view(-1, MANGLISH_VOCAB_SIZE), man_targets.view(-1))
                 loss_char = char_loss_fn(char_preds.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets.view(-1))
@@ -239,6 +260,10 @@ def main():
         # --- Validation Phase ---
         model.eval()
         val_loss = 0.0
+        outputs_shown = 0 # <-- MODIFIED: Counter for validation outputs
+        MAX_VAL_OUTPUTS = 5 # <-- MODIFIED: Max outputs to show
+        print(f"\n--- Epoch {epoch+1} Validation Outputs ---")
+
         val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{CONFIG['epochs']} [Val]")
         with torch.no_grad():
             for batch in val_bar:
@@ -248,13 +273,62 @@ def main():
                 
                 # No teacher forcing during validation
                 pinyin_preds, char_preds = model(videos, landmarks, pinyin_targets=None, char_targets=None, teacher_forcing_ratio=0.0)
+
+                # --- START OF FIX ---
+                # Get the sequence length from both predictions and targets
+                pinyin_pred_len = pinyin_preds.size(1)
+                pinyin_target_len = man_targets.size(1)
+                # Find the minimum length to compare
+                min_pinyin_len = min(pinyin_pred_len, pinyin_target_len)
                 
-                loss_pinyin = pinyin_loss_fn(pinyin_preds.view(-1, MANGLISH_VOCAB_SIZE), man_targets.view(-1))
-                loss_char = char_loss_fn(char_preds.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets.view(-1))
+                char_pred_len = char_preds.size(1)
+                char_target_len = mal_targets.size(1)
+                # Find the minimum length to compare
+                min_char_len = min(char_pred_len, char_target_len)
+
+                # Slice *both* tensors to the minimum length
+                pinyin_preds_sliced = pinyin_preds[:, :min_pinyin_len, :]
+                man_targets_sliced = man_targets[:, :min_pinyin_len]
+                
+                char_preds_sliced = char_preds[:, :min_char_len, :]
+                mal_targets_sliced = mal_targets[:, :min_char_len]
+
+                # Calculate loss on the *identically-sized* sliced tensors
+                loss_pinyin = pinyin_loss_fn(pinyin_preds_sliced.view(-1, MANGLISH_VOCAB_SIZE), man_targets_sliced.view(-1))
+                loss_char = char_loss_fn(char_preds_sliced.view(-1, MALAYALAM_VOCAB_SIZE), mal_targets_sliced.view(-1))
+                # --- END OF FIX ---
+
                 total_loss = CONFIG["lambda_val"] * loss_pinyin + (1 - CONFIG["lambda_val"]) * loss_char
 
                 val_loss += total_loss.item()
                 val_bar.set_postfix(loss=f"{total_loss.item():.4f}")
+
+                # --- START: MODIFIED section to show outputs ---
+                if outputs_shown < MAX_VAL_OUTPUTS:
+                    # Get predicted indices by taking argmax along the vocabulary dimension
+                    pred_pinyin_indices = torch.argmax(pinyin_preds, dim=2)
+                    pred_char_indices = torch.argmax(char_preds, dim=2)
+
+                    # We'll just show the first item in the batch (index 0)
+                    # Convert token indices to text
+                    true_man_text = tokens_to_text(man_targets[0], int_to_manglish)
+                    pred_man_text = tokens_to_text(pred_pinyin_indices[0], int_to_manglish)
+                    
+                    true_mal_text = tokens_to_text(mal_targets[0], int_to_malayalam)
+                    pred_mal_text = tokens_to_text(pred_char_indices[0], int_to_malayalam)
+
+                    # Print in a neat format
+                    print(f"\n--- Sample {outputs_shown + 1} ---")
+                    print(f"  [Manglish] GT:   {true_man_text}")
+                    print(f"  [Manglish] Pred: {pred_man_text}")
+                    print(f"  [Malayalam] GT:   {true_mal_text}")
+                    print(f"  [Malayalam] Pred: {pred_mal_text}")
+                    
+                    outputs_shown += 1
+                    
+                    if outputs_shown == MAX_VAL_OUTPUTS:
+                        print("--------------------------------------\n") # Footer
+                # --- END: MODIFIED section ---
 
         avg_val_loss = val_loss / len(val_loader)
         print(f"Epoch {epoch+1} Summary | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")

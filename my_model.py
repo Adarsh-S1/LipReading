@@ -410,10 +410,23 @@ class LipFormer(nn.Module):
             top1 = pinyin_output.argmax(1)
             pinyin_input = pinyin_targets[:, t] if use_teacher_force and pinyin_targets is not None else top1
 
-        # Step 4: Encode the ground-truth Pinyin sequence
+        # Step 4: Encode the Pinyin sequence for the Character Decoder
         # This is used as context for the character decoder as per the paper
-        pinyin_embedded = self.pinyin_embedding(pinyin_targets)
-        pinyin_encoder_outputs, _ = self.pinyin_encoder(pinyin_embedded)
+
+        if pinyin_targets is not None:
+            # --- Training Mode ---
+            # Use the ground-truth pinyin targets
+            pinyin_embedded = self.pinyin_embedding(pinyin_targets)
+            pinyin_encoder_outputs, _ = self.pinyin_encoder(pinyin_embedded)
+        else:
+            # --- Validation/Inference Mode ---
+            # Use the pinyin sequence predicted in Step 3
+            # pinyin_outputs shape: [B, max_pinyin_len, num_pinyins]
+            predicted_pinyin_tokens = pinyin_outputs.argmax(dim=-1) # Get the index of the highest logit
+            
+            # Pass the *predicted* tokens to the embedding layer
+            pinyin_embedded = self.pinyin_embedding(predicted_pinyin_tokens)
+            pinyin_encoder_outputs, _ = self.pinyin_encoder(pinyin_embedded)
 
         # Step 5: Decode Character sequence
         max_char_len = char_targets.size(1) if char_targets is not None else 20
