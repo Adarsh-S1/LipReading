@@ -192,7 +192,7 @@ class CrossModalFusion(nn.Module):
     The paper describes self-attention followed by cross-attention.
     This is effectively a standard Transformer Encoder layer.
     """
-    def __init__(self, d_model=512, nhead=8, num_layers=3, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, d_model=512, nhead=8, num_layers=3, dim_feedforward=2048, dropout=0.3):
         super(CrossModalFusion, self).__init__()
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -349,7 +349,7 @@ class LipFormer(nn.Module):
     The complete LipFormer model, integrating all components.
     """
     def __init__(self, num_pinyins, num_chars, hidden_dim=256, d_model=512,
-                 pinyin_emb_dim=128, char_emb_dim=128, dropout=0.1, device='cpu'):
+                 pinyin_emb_dim=128, char_emb_dim=128, dropout=0.3, device='cpu'):
         super(LipFormer, self).__init__()
 
         self.device = device

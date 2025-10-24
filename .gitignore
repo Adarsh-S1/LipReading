@@ -12,3 +12,6 @@ Extraction_Code/extracted_landmarks/
 Extraction_Code/extracted_lip_crosssection/
 Extraction_Code/extracted_landmarks_model_ready/
 
+#checkpoints 
+checkpoints/ 
+__pycache__/ 
