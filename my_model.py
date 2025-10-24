@@ -78,7 +78,7 @@ class VisualStream(nn.Module):
         cnn_output_size = 256
 
         self.gru = nn.GRU(cnn_output_size, hidden_dim, num_layers=2,
-                          batch_first=True, bidirectional=True)
+                          batch_first=True, bidirectional=True,dropout=0.3)
 
     def forward(self, x):
         # Input x: [B, C, T, H, W] (e.g., [B, 1, 75, 80, 160])
@@ -118,7 +118,7 @@ class LandmarkStream(nn.Module):
         self.embedding = nn.Linear(input_dim, 512)
 
         self.gru = nn.GRU(512, hidden_dim, num_layers=2,
-                          batch_first=True, bidirectional=True)
+                          batch_first=True, bidirectional=True,dropout=0.3)
 
     def _calculate_angle_matrix(self, landmarks):
         # landmarks: [B, T, N, 2] where N is num_landmarks (37)
